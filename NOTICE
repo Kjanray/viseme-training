@@ -1,0 +1,11 @@
+This project includes a model weight file (data/models/phoneme_ridge_beat.npz)
+trained on the BEAT v1 dataset:
+
+  Liu et al., "BEAT: A Large-Scale Semantic and Emotional Multi-Modal Dataset
+  for Conversational Gestures Synthesis", ECCV 2022.
+  Dataset: https://huggingface.co/datasets/H-Liu1997/BEAT
+  Licensed under the Apache License, Version 2.0.
+
+This NOTICE file satisfies the attribution requirement of Apache 2.0. The
+trained model weights and all source code in this repository are licensed
+under MIT (see LICENSE).

@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.claude/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Defensive — block accidental re-introduction during manual sync
+data/datasets/
+data/reports/
+tests/
+scripts/export_for_animator.py
+docs/ML_VISEME_GUIDE.md
+docs/MODEL_ANALYSIS.MD
+phoneme_mlp.npz
+mlp_vs_ridge.png
+*.bak
