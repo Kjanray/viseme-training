@@ -54,7 +54,7 @@ Findings from research on how phoneme-to-blendshape training is done in academia
 
 - [x] **Speaker normalization for BEAT**
   - Problem: 30 BEAT speakers have different resting faces, jaw sizes, lip thickness
-  - Fix: per-speaker mean subtraction before training; predict delta from neutral, not absolute weights
+  - Fix: per-speaker mean subtraction (train split only); fit deltas, then fold the average neutral face into the ridge bias so the model outputs absolute weights. Ridge only (MLP sigmoid output cannot produce negative deltas)
   - References: VOCA (2019) uses one-hot speaker conditioning; FaceFormer (2022) uses learned embeddings
 
 - [ ] **Sequence model (1D-CNN or LSTM)**

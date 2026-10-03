@@ -534,6 +534,11 @@ def train_and_save(
         print(f"  ERROR: Too few training examples ({len(all_pairs)})")
         return {"error": "insufficient data"}
 
+    if speaker_norm and model_type == "mlp":
+        # Sigmoid output can't produce the negative deltas speaker norm needs
+        print(f"  ERROR: --speaker-norm is only supported with ridge")
+        return {"error": "speaker_norm requires ridge"}
+
     # Build vocabulary
     vocab = build_vocabulary(all_pairs)
     print(f"  Vocabulary: {len(vocab)} phonemes: {vocab}")
@@ -549,16 +554,6 @@ def train_and_save(
     val_pairs = [p for p in all_pairs if p["sentence_idx"] not in train_sentences]
     print(f"  Train: {len(train_pairs)} ({split} sentences), "
           f"Val: {len(val_pairs)} ({len(sentence_ids) - split} sentences)")
-
-    # Speaker normalization: predict delta from speaker mean
-    speaker_means = None
-    if speaker_norm:
-        from src.speaker_norm import compute_speaker_means, normalize_pairs
-        speaker_means = compute_speaker_means(all_pairs)
-        normalize_pairs(train_pairs, speaker_means)
-        normalize_pairs(val_pairs, speaker_means)
-        print(f"  Speaker normalization: {len(speaker_means)} speakers, "
-              f"predicting deltas from per-speaker mean")
 
     # Featurize
     feat_label = "articulatory" if use_articulatory else "one-hot"
@@ -589,9 +584,22 @@ def train_and_save(
         print(f"  Parameters: {55 * D:,} (55 channels x {D} features)")
         print(f"  Data/param ratio: {len(train_pairs) / (55 * D):.1f}:1")
         sample_w = compute_sample_weights(train_pairs)
+        Y_fit = Y_train
+        if speaker_norm:
+            # Fit deltas from each speaker's mean (train split only, so no
+            # val leakage), then fold the average neutral face into the bias
+            # so the saved model outputs absolute weights for unseen speakers.
+            from src.speaker_norm import compute_speaker_means, speaker_offsets
+            speaker_means = compute_speaker_means(train_pairs)
+            neutral = np.mean(list(speaker_means.values()), axis=0)
+            Y_fit = Y_train - speaker_offsets(train_pairs, speaker_means, neutral)
+            print(f"  Speaker normalization: {len(speaker_means)} train speakers, "
+                  f"fitting deltas, neutral face folded into bias")
         print(f"  Training (alpha={alpha}, inverse-frequency weighted)...")
         t0 = time.time()
-        W, b = train_ridge(X_train, Y_train, alpha=alpha, sample_weights=sample_w)
+        W, b = train_ridge(X_train, Y_fit, alpha=alpha, sample_weights=sample_w)
+        if speaker_norm:
+            b = b + neutral
         elapsed = time.time() - t0
         print(f"  Trained in {elapsed:.3f}s")
         print(f"  W shape: {W.shape}, b shape: {b.shape}")

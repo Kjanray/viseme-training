@@ -8,10 +8,14 @@ Different speakers have different resting faces, jaw sizes, and lip
 thickness. Without normalization, the model learns an average across
 all speakers, which doesn't match any one speaker well.
 
+At inference the speaker is unknown, so the trainer folds the average
+neutral face (mean of the per-speaker means) back into the model bias.
+The saved model outputs absolute weights and needs no extra parameters.
+
 Usage:
-    means = compute_speaker_means(pairs)
-    normalize_pairs(pairs, means)        # modifies target_weights in place
-    denormalize_weights(weights, mean)   # restore absolute weights at inference
+    means = compute_speaker_means(train_pairs)       # train split only
+    neutral = np.mean(list(means.values()), axis=0)
+    Y_delta = Y - speaker_offsets(train_pairs, means, neutral)
 """
 
 from collections import defaultdict
@@ -43,21 +47,11 @@ def compute_speaker_means(pairs: list) -> dict:
     }
 
 
-def normalize_pairs(pairs: list, speaker_means: dict):
+def speaker_offsets(pairs: list, speaker_means: dict, fallback: np.ndarray) -> np.ndarray:
     """
-    Subtract each speaker's mean from target_weights (in place).
-
-    After normalization, target_weights represent how far each phoneme
-    deviates from that speaker's neutral face.
+    Per-pair speaker mean as an (N, 55) array. Speakers not in
+    speaker_means (e.g. unseen in training) get the fallback vector.
     """
-    for p in pairs:
-        sid = p.get("speaker_id", "")
-        mean = speaker_means.get(sid)
-        if mean is not None:
-            raw = np.array(p["target_weights"][:NUM_WEIGHTS], dtype=np.float32)
-            p["target_weights"] = (raw - mean).tolist()
-
-
-def denormalize_weights(weights: np.ndarray, speaker_mean: np.ndarray) -> np.ndarray:
-    """Add back the speaker mean to get absolute weights."""
-    return np.clip(weights + speaker_mean, 0.0, 1.0)
+    return np.stack([
+        speaker_means.get(p.get("speaker_id", ""), fallback) for p in pairs
+    ]).astype(np.float32)
