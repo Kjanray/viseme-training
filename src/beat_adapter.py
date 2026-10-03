@@ -37,7 +37,8 @@ Usage:
 """
 
 import argparse
-from datetime import time
+import gc
+import time
 import glob
 import json
 import os
@@ -359,40 +360,48 @@ def build_training_dataset(
     skipped = 0
     t_start = time.time()
 
-    for i, seq in enumerate(sequences):
-        if (i + 1) % 100 == 0:
-            elapsed = time.time() - t_start
-            rate = (i + 1) / elapsed
-            eta = (len(sequences) - i - 1) / rate if rate > 0 else 0
-            print(f"  [{i+1}/{len(sequences)}] {rate:.0f} seq/s, ETA {eta:.0f}s")
+    # Disable cyclic GC during the build loop: self.sentences accumulates
+    # millions of plain dicts (no cycles), so the GC sweeps find nothing
+    # but slow down each iteration as the heap grows. Re-enabled after.
+    gc.disable()
+    try:
+        for i, seq in enumerate(sequences):
+            if (i + 1) % 100 == 0:
+                elapsed = time.time() - t_start
+                rate = (i + 1) / elapsed
+                eta = (len(sequences) - i - 1) / rate if rate > 0 else 0
+                print(f"  [{i+1}/{len(sequences)}] {rate:.0f} seq/s, ETA {eta:.0f}s")
 
-        # Load blendshape frames
-        beat_data = load_beat_json(seq["json_path"])
-        frames = beat_data["frames"]
+            # Load blendshape frames
+            beat_data = load_beat_json(seq["json_path"])
+            frames = beat_data["frames"]
 
-        if not frames:
-            skipped += 1
-            continue
+            if not frames:
+                skipped += 1
+                continue
 
-        # Get transcript
-        transcript = extract_transcript_from_textgrid(seq.get("textgrid_path"))
+            # Get transcript
+            transcript = extract_transcript_from_textgrid(seq.get("textgrid_path"))
 
-        # Get phoneme timeline: prefer BEAT's own phones tier (already has
-        # ARPAbet phonemes with timing from iPhone capture). Fall back to
-        # MFA alignments if BEAT TextGrid has no phones tier.
-        phoneme_timeline = extract_phonemes_from_textgrid(seq.get("textgrid_path"))
+            # Get phoneme timeline: prefer BEAT's own phones tier (already has
+            # ARPAbet phonemes with timing from iPhone capture). Fall back to
+            # MFA alignments if BEAT TextGrid has no phones tier.
+            phoneme_timeline = extract_phonemes_from_textgrid(seq.get("textgrid_path"))
 
-        if not phoneme_timeline and mfa_alignments_dir:
-            mfa_tg_path = os.path.join(mfa_alignments_dir, seq["id"] + ".TextGrid")
-            phoneme_timeline = _parse_mfa_textgrid(mfa_tg_path)
+            if not phoneme_timeline and mfa_alignments_dir:
+                mfa_tg_path = os.path.join(mfa_alignments_dir, seq["id"] + ".TextGrid")
+                phoneme_timeline = _parse_mfa_textgrid(mfa_tg_path)
 
-        ds.add_sentence(
-            sentence_id=seq["id"],
-            text=transcript,
-            phoneme_timeline=phoneme_timeline,
-            target_frames=frames,
-        )
-        loaded += 1
+            ds.add_sentence(
+                sentence_id=seq["id"],
+                text=transcript,
+                phoneme_timeline=phoneme_timeline,
+                target_frames=frames,
+            )
+            loaded += 1
+    finally:
+        gc.enable()
+        gc.collect()
 
     # Single save at the end (no checkpoints — they were re-serializing
     # the entire dataset each time, taking minutes on large builds)

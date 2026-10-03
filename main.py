@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import gc
 import gzip
 import json
 import os
@@ -144,17 +145,22 @@ def stream_labeled_frames(path: str) -> list:
         pass
 
     t0 = time.time()
-    with opener(path, "rb") as f:
-        pbar = tqdm(ijson.items(f, "sentences.item"),
-                     total=total_sentences,
-                     desc="  Streaming sentences",
-                     unit="sent",
-                     ncols=90,
-                     leave=True)
-        for sentence in pbar:
-            pairs = _extract_pairs_from_sentence(sentence)
-            all_pairs.extend(pairs)
-            pbar.set_postfix(pairs=len(all_pairs), refresh=False)
+    gc.disable()
+    try:
+        with opener(path, "rb") as f:
+            pbar = tqdm(ijson.items(f, "sentences.item"),
+                         total=total_sentences,
+                         desc="  Streaming sentences",
+                         unit="sent",
+                         ncols=90,
+                         leave=True)
+            for sentence in pbar:
+                pairs = _extract_pairs_from_sentence(sentence)
+                all_pairs.extend(pairs)
+                pbar.set_postfix(pairs=len(all_pairs), refresh=False)
+    finally:
+        gc.enable()
+        gc.collect()
 
     elapsed = time.time() - t0
     tqdm.write(f"  Streamed -> {len(all_pairs)} pairs in {elapsed:.1f}s")
