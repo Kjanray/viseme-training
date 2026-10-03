@@ -16,3 +16,6 @@ docs/MODEL_ANALYSIS.MD
 phoneme_mlp.npz
 mlp_vs_ridge.png
 *.bak
+
+# Built datasets (too large for GitHub)
+data/ml/

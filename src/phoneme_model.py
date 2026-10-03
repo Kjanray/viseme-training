@@ -49,59 +49,82 @@ def build_vocabulary(pairs: list) -> list:
     return sorted(phones)
 
 
-def featurize(pairs: list, vocab: list) -> np.ndarray:
+def featurize(pairs: list, vocab: list, use_articulatory: bool = False) -> np.ndarray:
     """
     Convert labeled pairs to feature matrix.
 
-    Feature vector per phoneme instance:
-      - Current phoneme (one-hot, len(vocab) dims)
-      - Previous phoneme (one-hot, len(vocab) dims)
-      - Next phoneme (one-hot, len(vocab) dims)
-      - Duration (1 dim, normalized by mean duration)
-      - Position (3 dims: one-hot for start/mid/end)
+    Two encoding modes:
+      - One-hot (default): 3*len(vocab) + 4 dims. Each phoneme slot is a
+        one-hot over the vocabulary.
+      - Articulatory: 3*22 + 4 = 70 dims. Each phoneme slot encodes place,
+        manner, voicing, height, backness, rounding. Encodes phoneme
+        similarity so rare phonemes can borrow from neighbors.
+
+    Both modes append: duration (1 dim) + position (3 dims one-hot).
 
     Returns:
-        (N, D) float32 array where D = 3*len(vocab) + 4
+        (N, D) float32 array
     """
+    if use_articulatory:
+        return _featurize_articulatory(pairs)
+    return _featurize_onehot(pairs, vocab)
+
+
+def _featurize_onehot(pairs: list, vocab: list) -> np.ndarray:
     phone_to_idx = {p: i for i, p in enumerate(vocab)}
     v = len(vocab)
-    d = 3 * v + 4  # 3 one-hots + duration + 3 position dims
+    d = 3 * v + 4
 
-    # Compute mean duration for normalization
     durations = [p["duration_s"] for p in pairs]
     mean_dur = np.mean(durations) if durations else 0.08
 
     X = np.zeros((len(pairs), d), dtype=np.float32)
 
     for i, p in enumerate(pairs):
-        # Current phoneme one-hot
         idx = phone_to_idx.get(p["phone"])
         if idx is not None:
             X[i, idx] = 1.0
 
-        # Previous phoneme one-hot
         idx = phone_to_idx.get(p["prev_phone"])
         if idx is not None:
             X[i, v + idx] = 1.0
 
-        # Next phoneme one-hot
         idx = phone_to_idx.get(p["next_phone"])
         if idx is not None:
             X[i, 2 * v + idx] = 1.0
 
-        # Duration (normalized)
         X[i, 3 * v] = p["duration_s"] / mean_dur if mean_dur > 0 else 1.0
-
-        # Position (one-hot: start, mid, end)
-        pos = p.get("position", "mid")
-        if pos == "start":
-            X[i, 3 * v + 1] = 1.0
-        elif pos == "end":
-            X[i, 3 * v + 2] = 1.0
-        else:
-            X[i, 3 * v + 3] = 1.0
+        _encode_position(X, i, 3 * v + 1, p)
 
     return X
+
+
+def _featurize_articulatory(pairs: list) -> np.ndarray:
+    from src.articulatory import encode_triplet, TRIPLET_DIM
+
+    durations = [p["duration_s"] for p in pairs]
+    mean_dur = np.mean(durations) if durations else 0.08
+
+    X = np.zeros((len(pairs), TRIPLET_DIM), dtype=np.float32)
+
+    for i, p in enumerate(pairs):
+        triplet = encode_triplet(p["prev_phone"], p["phone"], p["next_phone"])
+        phoneme_dims = len(triplet)
+        X[i, :phoneme_dims] = triplet
+        X[i, phoneme_dims] = p["duration_s"] / mean_dur if mean_dur > 0 else 1.0
+        _encode_position(X, i, phoneme_dims + 1, p)
+
+    return X
+
+
+def _encode_position(X: np.ndarray, row: int, offset: int, pair: dict):
+    pos = pair.get("position", "mid")
+    if pos == "start":
+        X[row, offset] = 1.0
+    elif pos == "end":
+        X[row, offset + 1] = 1.0
+    else:
+        X[row, offset + 2] = 1.0
 
 
 def extract_targets(pairs: list) -> np.ndarray:
@@ -113,16 +136,18 @@ def extract_targets(pairs: list) -> np.ndarray:
     return Y
 
 
-def train_ridge(X: np.ndarray, Y: np.ndarray, alpha: float = 1.0) -> tuple:
+def train_ridge(X: np.ndarray, Y: np.ndarray, alpha: float = 1.0,
+                sample_weights: np.ndarray = None) -> tuple:
     """
     Train 55 ridge regressions (one per blendshape weight).
 
-    Closed-form solution: W = (X^T X + alpha I)^{-1} X^T Y
+    Closed-form solution: W = (X^T W_diag X + alpha I)^{-1} X^T W_diag Y
 
     Args:
         X: Feature matrix (N, D)
         Y: Target matrix (N, 55)
         alpha: Regularization strength (higher = more regularization)
+        sample_weights: Per-sample weights (N,). If None, uniform weighting.
 
     Returns:
         (W, b) where W is (55, D) and b is (55,)
@@ -133,17 +158,31 @@ def train_ridge(X: np.ndarray, Y: np.ndarray, alpha: float = 1.0) -> tuple:
     X_bias = np.hstack([X, np.ones((N, 1), dtype=np.float32)])
     D_bias = D + 1
 
-    # Closed-form ridge regression: W = (X^T X + alpha I)^{-1} X^T Y
-    XtX = X_bias.T @ X_bias
+    if sample_weights is not None:
+        sqrt_w = np.sqrt(sample_weights).astype(np.float32)
+        X_w = X_bias * sqrt_w[:, None]
+        Y_w = Y * sqrt_w[:, None]
+    else:
+        X_w = X_bias
+        Y_w = Y
+
+    XtX = X_w.T @ X_w
     regularizer = alpha * np.eye(D_bias, dtype=np.float32)
     regularizer[-1, -1] = 0.0  # Don't regularize the bias term
 
-    W_full = np.linalg.solve(XtX + regularizer, X_bias.T @ Y)  # (D+1, 55)
+    W_full = np.linalg.solve(XtX + regularizer, X_w.T @ Y_w)  # (D+1, 55)
 
     W = W_full[:-1, :].T  # (55, D)
     b = W_full[-1, :]      # (55,)
 
     return W, b
+
+
+def compute_sample_weights(pairs: list) -> np.ndarray:
+    """Inverse-frequency weights so rare phonemes contribute equally."""
+    from collections import Counter
+    counts = Counter(p["phone"] for p in pairs)
+    return np.array([1.0 / counts[p["phone"]] for p in pairs], dtype=np.float32)
 
 
 def train_mlp(
@@ -452,6 +491,9 @@ def train_and_save(
     alpha: float = 1.0,
     dry_run: bool = False,
     model_type: str = "ridge",
+    use_articulatory: bool = False,
+    multi_sample: bool = False,
+    speaker_norm: bool = False,
 ) -> dict:
     """
     Full training pipeline: load data, split, train, evaluate, save.
@@ -483,8 +525,9 @@ def train_and_save(
           f"{ds.metadata.get('total_frames', 0)} frames")
 
     # Extract labeled pairs
-    print(f"  Extracting labeled pairs...")
-    all_pairs = ds.get_all_labeled_frames()
+    sample_label = "multi-sample (25/50/75%)" if multi_sample else "midpoint only"
+    print(f"  Extracting labeled pairs ({sample_label})...")
+    all_pairs = ds.get_all_labeled_frames(multi_sample=multi_sample)
     print(f"  {len(all_pairs)} phoneme instances")
 
     if len(all_pairs) < 100:
@@ -495,22 +538,34 @@ def train_and_save(
     vocab = build_vocabulary(all_pairs)
     print(f"  Vocabulary: {len(vocab)} phonemes: {vocab}")
 
-    # Split: 85% train, 15% validation (deterministic shuffle)
+    # Split: 85% train, 15% validation by sentence (no cross-sentence leakage)
     rng = np.random.RandomState(42)
-    indices = rng.permutation(len(all_pairs))
-    split = int(0.85 * len(indices))
-    train_idx = indices[:split]
-    val_idx = indices[split:]
+    sentence_ids = sorted(set(p["sentence_idx"] for p in all_pairs))
+    sentence_perm = rng.permutation(len(sentence_ids))
+    split = int(0.85 * len(sentence_perm))
+    train_sentences = set(sentence_ids[i] for i in sentence_perm[:split])
 
-    train_pairs = [all_pairs[i] for i in train_idx]
-    val_pairs = [all_pairs[i] for i in val_idx]
-    print(f"  Train: {len(train_pairs)}, Val: {len(val_pairs)}")
+    train_pairs = [p for p in all_pairs if p["sentence_idx"] in train_sentences]
+    val_pairs = [p for p in all_pairs if p["sentence_idx"] not in train_sentences]
+    print(f"  Train: {len(train_pairs)} ({split} sentences), "
+          f"Val: {len(val_pairs)} ({len(sentence_ids) - split} sentences)")
+
+    # Speaker normalization: predict delta from speaker mean
+    speaker_means = None
+    if speaker_norm:
+        from src.speaker_norm import compute_speaker_means, normalize_pairs
+        speaker_means = compute_speaker_means(all_pairs)
+        normalize_pairs(train_pairs, speaker_means)
+        normalize_pairs(val_pairs, speaker_means)
+        print(f"  Speaker normalization: {len(speaker_means)} speakers, "
+              f"predicting deltas from per-speaker mean")
 
     # Featurize
-    print(f"  Featurizing...")
-    X_train = featurize(train_pairs, vocab)
+    feat_label = "articulatory" if use_articulatory else "one-hot"
+    print(f"  Featurizing ({feat_label})...")
+    X_train = featurize(train_pairs, vocab, use_articulatory=use_articulatory)
     Y_train = extract_targets(train_pairs)
-    X_val = featurize(val_pairs, vocab)
+    X_val = featurize(val_pairs, vocab, use_articulatory=use_articulatory)
     Y_val = extract_targets(val_pairs)
 
     mean_duration = float(np.mean([p["duration_s"] for p in train_pairs]))
@@ -533,9 +588,10 @@ def train_and_save(
     else:
         print(f"  Parameters: {55 * D:,} (55 channels x {D} features)")
         print(f"  Data/param ratio: {len(train_pairs) / (55 * D):.1f}:1")
-        print(f"  Training (alpha={alpha})...")
+        sample_w = compute_sample_weights(train_pairs)
+        print(f"  Training (alpha={alpha}, inverse-frequency weighted)...")
         t0 = time.time()
-        W, b = train_ridge(X_train, Y_train, alpha=alpha)
+        W, b = train_ridge(X_train, Y_train, alpha=alpha, sample_weights=sample_w)
         elapsed = time.time() - t0
         print(f"  Trained in {elapsed:.3f}s")
         print(f"  W shape: {W.shape}, b shape: {b.shape}")
@@ -587,6 +643,8 @@ def train_and_save(
     else:
         metadata = {
             "model_type": model_type,
+            "feature_encoding": "articulatory" if use_articulatory else "onehot",
+            "speaker_norm": speaker_norm,
             "n_train": len(train_pairs),
             "n_val": len(val_pairs),
             "n_features": D,
@@ -628,6 +686,12 @@ def main():
                         help="Model type: ridge (linear) or mlp (neural network)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Train and evaluate without saving")
+    parser.add_argument("--articulatory", action="store_true",
+                        help="Use articulatory features instead of one-hot encoding")
+    parser.add_argument("--multi-sample", action="store_true",
+                        help="Sample at 25/50/75%% of phoneme duration instead of midpoint only")
+    parser.add_argument("--speaker-norm", action="store_true",
+                        help="Per-speaker mean subtraction (predict deltas from neutral)")
     args = parser.parse_args()
 
     train_and_save(
@@ -636,6 +700,9 @@ def main():
         alpha=args.alpha,
         dry_run=args.dry_run,
         model_type=args.model_type,
+        use_articulatory=args.articulatory,
+        multi_sample=args.multi_sample,
+        speaker_norm=args.speaker_norm,
     )
 
 

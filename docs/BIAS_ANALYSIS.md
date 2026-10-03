@@ -6,19 +6,19 @@ Findings from research on how phoneme-to-blendshape training is done in academia
 
 ## Quick Wins (hours each)
 
-- [ ] **Sentence-level train/val split**
+- [x] **Sentence-level train/val split**
   - Current: random 85/15 split of individual phoneme instances
   - Problem: phonemes from the same sentence share temporal context, leaking information across the split
   - Fix: in `phoneme_model.py`, split by sentence index, not random phoneme instances
   - File: `src/phoneme_model.py` line ~325
 
-- [ ] **Inverse-frequency weighting**
+- [x] **Inverse-frequency weighting**
   - Current: all phonemes weighted equally in the loss
   - Problem: rare phonemes (zh=16, oy=27 examples) have high-variance estimates
   - Fix: weighted ridge regression: `W = (X^T diag(w) X + αI)^{-1} X^T diag(w) Y` where w = 1/frequency
   - File: `src/phoneme_model.py:train_ridge()`
 
-- [ ] **Compute _TARGET_MAX from BEAT data**
+- [x] **Compute _TARGET_MAX from BEAT data**
   - Current: hand-tuned rescaling targets (jawOpen=0.55, etc.) from the original viseme map
   - Problem: arbitrary values tuned for one avatar, not empirically derived
   - Fix: compute 95th percentile per channel from BEAT frames, use as target max
@@ -28,14 +28,14 @@ Findings from research on how phoneme-to-blendshape training is done in academia
 
 ## Medium Effort (1-2 days each)
 
-- [ ] **Articulatory features instead of one-hot**
+- [x] **Articulatory features instead of one-hot**
   - Current: one-hot phoneme encoding (124 dims), treats `b` and `p` as completely unrelated
   - Problem: can't learn that bilabial stops share lip closure; rare phonemes can't borrow from similar ones
   - Fix: replace with 6-8 dim articulatory features: place (bilabial/alveolar/velar), manner (stop/fricative/nasal), voicing, lip rounding, tongue height, nasality
   - Reduces features from 124 to ~25 dims, encodes similarity, helps rare phonemes
   - File: `src/phoneme_model.py:featurize()`
 
-- [ ] **Multiple frames per phoneme**
+- [x] **Multiple frames per phoneme**
   - Current: extract only the midpoint frame per phoneme
   - Problem: for 40ms stop consonants, midpoint may still be in transition, not at apex
   - Fix: extract frames at 25%, 50%, 75% of phoneme duration, average for more robust targets
@@ -52,7 +52,7 @@ Findings from research on how phoneme-to-blendshape training is done in academia
 
 ## Large Effort (days-weeks)
 
-- [ ] **Speaker normalization for BEAT**
+- [x] **Speaker normalization for BEAT**
   - Problem: 30 BEAT speakers have different resting faces, jaw sizes, lip thickness
   - Fix: per-speaker mean subtraction before training; predict delta from neutral, not absolute weights
   - References: VOCA (2019) uses one-hot speaker conditioning; FaceFormer (2022) uses learned embeddings
@@ -79,7 +79,7 @@ Findings from research on how phoneme-to-blendshape training is done in academia
 | IPA→ARPAbet normalization for Inworld phonemes | FIXED | 43 Inworld symbols mapped to ARPAbet |
 | BEAT 60→30 FPS downsampling loses fast consonant detail | MEDIUM | Known, could average frames instead |
 | Azure viseme ID ambiguity (40→22 phonemes) | MEDIUM | Mitigated: CMUdict + BEAT bypass this |
-| One-hot encoding treats all phonemes as equidistant | MEDIUM | TODO: articulatory features |
+| One-hot encoding treats all phonemes as equidistant | MEDIUM | FIXED: articulatory features in `src/articulatory.py` |
 | Silence over-representation in training data | LOW | Rescaling handles the baseline |
 
 ---

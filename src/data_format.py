@@ -118,35 +118,29 @@ class TrainingDataset:
         ds.sentences = data.get("sentences", [])
         return ds
 
-    def get_all_labeled_frames(self) -> list:
+    def get_all_labeled_frames(self, multi_sample: bool = False) -> list:
         """
         Extract all (phoneme_info, target_weights) pairs for training.
 
-        For each phoneme in each sentence, finds the target frames that
-        fall within that phoneme's time window and returns the midpoint frame.
+        Args:
+            multi_sample: If True, extract frames at 25%, 50%, 75% of each
+                phoneme's duration and average them for more robust targets.
+                If False (default), extract only the midpoint frame.
 
         Returns:
-            List of dicts:
-            [{
-                "phone": str,           # ARPAbet phoneme
-                "viseme_10": str,       # 10-category viseme label
-                "prev_phone": str,      # Previous phoneme (or "sil")
-                "next_phone": str,      # Next phoneme (or "sil")
-                "duration_s": float,    # Phoneme duration in seconds
-                "position": str,        # "start", "mid", or "end" in sequence
-                "target_weights": [55 floats],  # Gold-standard weights at midpoint
-            }, ...]
+            List of dicts with phone, context, duration, position,
+            target_weights (55 floats), and sentence_idx.
         """
         all_pairs = []
+        sample_points = [0.25, 0.5, 0.75] if multi_sample else [0.5]
 
-        for sentence in self.sentences:
+        for sentence_idx, sentence in enumerate(self.sentences):
             timeline = sentence.get("phoneme_timeline", [])
             frames = sentence.get("target_frames", [])
 
             if not timeline or not frames:
                 continue
 
-            # Build frame index for quick lookup by time
             frame_times = [(f["time_ms"], f["weights"]) for f in frames]
 
             for i, phoneme in enumerate(timeline):
@@ -155,25 +149,37 @@ class TrainingDataset:
                 start_s = phoneme.get("start_s", 0.0)
                 duration_s = phoneme.get("duration_s", 0.0)
 
-                # Find midpoint time in ms
-                mid_ms = (start_s + duration_s / 2.0) * 1000.0
+                sampled = []
+                for frac in sample_points:
+                    t_ms = (start_s + duration_s * frac) * 1000.0
+                    w = _find_nearest_frame(frame_times, t_ms)
+                    if w is not None:
+                        sampled.append(w)
 
-                # Find nearest frame to midpoint
-                nearest_weights = _find_nearest_frame(frame_times, mid_ms)
-                if nearest_weights is None:
+                if not sampled:
                     continue
 
-                # Context
+                if len(sampled) == 1:
+                    target = sampled[0]
+                else:
+                    target = [
+                        sum(s[ch] for s in sampled) / len(sampled)
+                        for ch in range(len(sampled[0]))
+                    ]
+
                 prev_phone = timeline[i - 1].get("phone", "sil") if i > 0 else "sil"
                 next_phone = timeline[i + 1].get("phone", "sil") if i < len(timeline) - 1 else "sil"
 
-                # Position in sequence
                 if i == 0:
                     position = "start"
                 elif i == len(timeline) - 1:
                     position = "end"
                 else:
                     position = "mid"
+
+                # Speaker ID is the first segment of the sentence ID (e.g., "1" from "1_wayne_0_1_1")
+                sentence_id = sentence.get("id", "")
+                speaker_id = sentence_id.split("_")[0] if sentence_id else ""
 
                 all_pairs.append({
                     "phone": phone,
@@ -182,7 +188,9 @@ class TrainingDataset:
                     "next_phone": next_phone,
                     "duration_s": duration_s,
                     "position": position,
-                    "target_weights": nearest_weights,
+                    "target_weights": target,
+                    "sentence_idx": sentence_idx,
+                    "speaker_id": speaker_id,
                 })
 
         return all_pairs
